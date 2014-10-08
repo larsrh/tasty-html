@@ -6,6 +6,7 @@
 -- | Run a 'Tasty.TestTree' and produce an HTML file summarising the test results.
 module Test.Tasty.Runners.Html
   ( HtmlPath(..)
+  , AuxPath(..)
   , htmlRunner
   ) where
 
@@ -14,8 +15,10 @@ import Control.Monad ((>=>), unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Concurrent.STM (atomically, readTVar)
 import qualified Control.Concurrent.STM as STM(retry)
+import Data.Foldable (traverse_)
 import Data.Maybe (fromMaybe)
 import Data.Monoid (Monoid(mempty,mappend), (<>), Sum(Sum,getSum))
+import Data.String (fromString)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
 import qualified Data.Text.Lazy.IO as TIO
@@ -40,6 +43,8 @@ import Text.Blaze.Html5 (Markup, AttributeValue, (!))
 import qualified Text.Blaze.Html5 as H
 import qualified Text.Blaze.Html5.Attributes as A
 import Text.Blaze.Html.Renderer.Text (renderHtml)
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>), takeDirectory)
 
 import Paths_tasty_html (getDataFileName)
 
@@ -55,6 +60,18 @@ instance IsOption (Maybe HtmlPath) where
   optionName = Tagged "html"
   optionHelp = Tagged "A file path to store the test results in HTML"
 
+-- | Path where the auxiliary files will be copied to. If unset, auxiliary files will be inlined into the HTML.
+newtype AuxPath = AuxPath (Maybe FilePath) deriving (Typeable)
+
+-- | Auxiliary file 'Option' for the HTML 'Ingredient'.
+instance IsOption AuxPath where
+  defaultValue = AuxPath Nothing
+  parseValue = Just . AuxPath . Just
+  optionName = Tagged "html-aux"
+  optionHelp = Tagged "A file path to store the auxiliary files for the HTML results (relative to HTML path)"
+
+
+
 {-| To run tests using this ingredient, use 'Tasty.defaultMainWithIngredients',
     passing 'htmlRunner' as one possible ingredient. This ingredient will run
     tests if you pass the @--html@ command line option. For example,
@@ -64,6 +81,7 @@ instance IsOption (Maybe HtmlPath) where
 htmlRunner :: Ingredient
 htmlRunner = TestReporter optionDescription $ \options testTree -> do
   HtmlPath path <- lookupOption options
+  let AuxPath auxPath = lookupOption options
   return $ \statusMap -> do
     Const summary <- flip evalStateT 0 $ getCompose $ getTraversal $
       Tasty.foldTestTree
@@ -73,13 +91,13 @@ htmlRunner = TestReporter optionDescription $ \options testTree -> do
         options
         testTree
 
-    -- Ignore ellapsed time
+    -- Ignore elapsed time
     return $ const $ do
-      generateHtml summary path
+      generateHtml summary path auxPath
       return $ getSum (summaryFailures summary) == 0
 
  where
-  optionDescription = [ Option (Proxy :: Proxy (Maybe HtmlPath)) ]
+  optionDescription = [ Option (Proxy :: Proxy (Maybe HtmlPath)), Option (Proxy :: Proxy AuxPath) ]
 
 -- * Internal
 
@@ -147,22 +165,45 @@ runGroup groupName children = Traversal $ Compose $ do
 
 -- | Generates the final HTML report.
 generateHtml :: Summary  -- ^ Test summary.
-             -> FilePath -- ^ Where to write.
+             -> FilePath -- ^ Where to write the HTML output.
+             -> Maybe FilePath -- ^ Where to write the auxiliary files.
              -> IO ()
-generateHtml summary path = do
+generateHtml summary htmlPath auxPath = do
+  traverse_ (createDirectoryIfMissing True) auxPath
+
       -- Helpers to load external assets
   let getRead = getDataFileName >=> B.readFile
-      includeMarkup = getRead >=> return . H.unsafeByteString
-      -- blaze-html 'script' doesn't admit HTML inside
-      includeScript = getRead >=> \bs ->
-        return . H.unsafeByteString $ "<script \"type=text/javascript\">" <> bs <> "</script>"
+      put path file contents = do
+        createDirectoryIfMissing True $ path </> takeDirectory file
+        B.writeFile (path </> file) contents
+      includeMarkup file = do
+        contents <- getRead file
+        case auxPath of
+          Nothing -> return $ H.unsafeByteString contents
+          Just p -> do
+            put p file contents
+            return $
+              H.link ! A.href (fromString (p </> file))
+                     ! A.rel "stylesheet"
+                     ! A.type_ "text/css"
+      includeScript file = do
+        contents <- getRead file
+        case auxPath of
+          Nothing ->
+            -- blaze-html 'script' doesn't admit HTML inside
+            return $ H.unsafeByteString $ "<script \"type=text/javascript\">" <> contents <> "</script>"
+          Just p -> do
+            put p file contents
+            return $
+              H.script ! A.src (fromString (p </> file))
+                       ! A.type_ "text/javascript" $ return ()
 
   bootStrapCss      <- includeMarkup "data/bootstrap/dist/css/bootstrap.min.css"
   jQueryJs          <- includeScript "data/jquery-2.1.1.min.js"
   bootStrapJs       <- includeScript "data/bootstrap/dist/js/bootstrap.min.js"
   scriptJs          <- includeScript "data/script.js"
 
-  TIO.writeFile path $
+  TIO.writeFile htmlPath $
     renderHtml $
       H.docTypeHtml ! A.lang "en" $ do
         H.head $ do
