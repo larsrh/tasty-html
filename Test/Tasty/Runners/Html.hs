@@ -9,8 +9,10 @@ module Test.Tasty.Runners.Html
   , htmlRunner
   ) where
 
-import Control.Applicative (Const(..), (<$))
+import Control.Applicative (Const(..), (<$), (<$>))
 import Control.Monad (unless)
+import Control.DeepSeq (force)
+import Control.Exception.Base (SomeException, evaluate, try)
 import Control.Monad.Trans.Class (lift)
 import Control.Concurrent.STM (atomically, readTVar)
 import qualified Control.Concurrent.STM as STM(retry)
@@ -20,7 +22,7 @@ import Data.String (fromString)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
 import qualified Data.Text.Lazy.IO as TIO
-import Control.Monad.State (StateT, evalStateT)
+import Control.Monad.State (StateT, evalStateT, liftIO)
 import qualified Control.Monad.State as State (get, modify)
 import Data.Functor.Compose (Compose(Compose,getCompose))
 import qualified Data.IntMap as IntMap
@@ -40,6 +42,7 @@ import Text.Blaze.Html5 (Markup, AttributeValue, (!))
 import qualified Text.Blaze.Html5 as H
 import qualified Text.Blaze.Html5.Attributes as A
 import Text.Blaze.Html.Renderer.Text (renderHtml)
+import Text.Printf (printf)
 
 -- * Exported
 
@@ -102,27 +105,45 @@ type SummaryTraversal = Traversal (Compose (StateT Int IO) (Const Summary))
 
 -- ** Test folding
 
+-- | Printing exceptions or other messages is tricky — in the process we
+-- can get new exceptions!
+--
+-- See e.g. https://github.com/feuerbach/tasty/issues/25
+formatMessage :: String -> IO String
+formatMessage msg = go 3 msg
+  where
+    -- to avoid infinite recursion, we introduce the recursion limit
+    go :: Int -> String -> IO String
+    go 0        _ = return "exceptions keep throwing other exceptions!"
+    go recLimit msg = do
+      mbStr <- try $ evaluate $ force msg
+      case mbStr of
+        Right str -> return str
+        Left e' -> printf "message threw an exception: %s" <$> go (recLimit-1) (show (e' :: SomeException))
+
 -- | To be used for an individual test when when folding the final 'TestTree'.
 runTest :: IsTest t
         => StatusMap -> OptionSet -> TestName -> t -> SummaryTraversal
 runTest statusMap _ testName _ = Traversal $ Compose $ do
   ix <- State.get
 
-  summary <- lift $ atomically $ do
+  result <- lift $ atomically $ do
     status <- readTVar $
       fromMaybe (error "Attempted to lookup test by index outside bounds") $
       IntMap.lookup ix statusMap
 
     case status of
-      -- If the test is done, generate HTML for it
-      Done result
-        | Tasty.resultSuccessful result -> return $
-            mkSuccess testName $ Tasty.resultDescription result
-        | otherwise ->
-            return $ mkFailure testName $ Tasty.resultDescription result
+      -- If the test is done, return the result
+      Done result -> return result
       -- Otherwise the test has either not been started or is currently
       -- executing
       _ -> STM.retry
+
+  -- Generate HTML for the test
+  msg <- liftIO . formatMessage . Tasty.resultDescription $ result
+  let summary = if Tasty.resultSuccessful result
+                then mkSuccess testName msg
+                else mkFailure testName msg
 
   Const summary <$ State.modify (+1)
 
