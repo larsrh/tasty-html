@@ -10,16 +10,16 @@ module Test.Tasty.Runners.Html
   ) where
 
 import Control.Applicative (Const(..), (<$))
-import Control.Monad ((>=>), unless)
+import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Concurrent.STM (atomically, readTVar)
 import qualified Control.Concurrent.STM as STM(retry)
 import Data.Maybe (fromMaybe)
 import Data.Monoid (Monoid(mempty,mappend), (<>), Sum(Sum,getSum))
+import Data.String (fromString)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
 import qualified Data.Text.Lazy.IO as TIO
-import qualified Data.ByteString as B
 import Control.Monad.State (StateT, evalStateT)
 import qualified Control.Monad.State as State (get, modify)
 import Data.Functor.Compose (Compose(Compose,getCompose))
@@ -41,8 +41,6 @@ import qualified Text.Blaze.Html5 as H
 import qualified Text.Blaze.Html5.Attributes as A
 import Text.Blaze.Html.Renderer.Text (renderHtml)
 
-import Paths_tasty_html (getDataFileName)
-
 -- * Exported
 
 -- | Path where the HTML will be rendered.
@@ -54,6 +52,8 @@ instance IsOption (Maybe HtmlPath) where
   parseValue = Just . Just . HtmlPath
   optionName = Tagged "html"
   optionHelp = Tagged "A file path to store the test results in HTML"
+
+
 
 {-| To run tests using this ingredient, use 'Tasty.defaultMainWithIngredients',
     passing 'htmlRunner' as one possible ingredient. This ingredient will run
@@ -73,7 +73,7 @@ htmlRunner = TestReporter optionDescription $ \options testTree -> do
         options
         testTree
 
-    -- Ignore ellapsed time
+    -- Ignore elapsed time
     return $ const $ do
       generateHtml summary path
       return $ getSum (summaryFailures summary) == 0
@@ -147,20 +147,22 @@ runGroup groupName children = Traversal $ Compose $ do
 
 -- | Generates the final HTML report.
 generateHtml :: Summary  -- ^ Test summary.
-             -> FilePath -- ^ Where to write.
+             -> FilePath -- ^ Where to write the HTML output.
              -> IO ()
 generateHtml summary path = do
       -- Helpers to load external assets
-  let getRead = getDataFileName >=> B.readFile
-      includeMarkup = getRead >=> return . H.unsafeByteString
-      -- blaze-html 'script' doesn't admit HTML inside
-      includeScript = getRead >=> \bs ->
-        return . H.unsafeByteString $ "<script \"type=text/javascript\">" <> bs <> "</script>"
+  let includeMarkup file =
+        H.link ! A.href (fromString ("/assets/" ++ file))
+               ! A.rel "stylesheet"
+               ! A.type_ "text/css"
+      includeScript file =
+        H.script ! A.src (fromString ("/assets/" ++ file))
+                 ! A.type_ "text/javascript" $ return ()
 
-  bootStrapCss      <- includeMarkup "data/bootstrap/dist/css/bootstrap.min.css"
-  jQueryJs          <- includeScript "data/jquery-2.1.1.min.js"
-  bootStrapJs       <- includeScript "data/bootstrap/dist/js/bootstrap.min.js"
-  scriptJs          <- includeScript "data/script.js"
+  let bootStrapCss = includeMarkup "bootstrap/dist/css/bootstrap.min.css"
+      jQueryJs     = includeScript "jquery-2.1.1.min.js"
+      bootStrapJs  = includeScript "bootstrap/dist/js/bootstrap.min.js"
+      scriptJs     = includeScript "script.js"
 
   TIO.writeFile path $
     renderHtml $
@@ -170,7 +172,7 @@ generateHtml summary path = do
           H.meta ! A.name "viewport"
                  ! A.content "width=device-width, initial-scale=1.0"
           H.title "Tasty Test Results"
-          H.style bootStrapCss
+          bootStrapCss
 
           jQueryJs
           bootStrapJs
