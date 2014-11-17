@@ -105,22 +105,6 @@ type SummaryTraversal = Traversal (Compose (StateT Int IO) (Const Summary))
 
 -- ** Test folding
 
--- | Printing exceptions or other messages is tricky — in the process we
--- can get new exceptions!
---
--- See e.g. https://github.com/feuerbach/tasty/issues/25
-formatMessage :: String -> IO String
-formatMessage msg = go 3 msg
-  where
-    -- to avoid infinite recursion, we introduce the recursion limit
-    go :: Int -> String -> IO String
-    go 0        _ = return "exceptions keep throwing other exceptions!"
-    go recLimit msg = do
-      mbStr <- try $ evaluate $ force msg
-      case mbStr of
-        Right str -> return str
-        Left e' -> printf "message threw an exception: %s" <$> go (recLimit-1) (show (e' :: SomeException))
-
 -- | To be used for an individual test when when folding the final 'TestTree'.
 runTest :: IsTest t
         => StatusMap -> OptionSet -> TestName -> t -> SummaryTraversal
@@ -140,7 +124,7 @@ runTest statusMap _ testName _ = Traversal $ Compose $ do
       _ -> STM.retry
 
   -- Generate HTML for the test
-  msg <- liftIO . formatMessage . Tasty.resultDescription $ result
+  msg <- liftIO . Tasty.formatMessage . Tasty.resultDescription $ result
   let summary = if Tasty.resultSuccessful result
                 then mkSuccess testName msg
                 else mkFailure testName msg
